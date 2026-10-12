@@ -15,10 +15,12 @@
   命令行：    python shutdown_timer.py --in 90        # 90 分钟后关机
               python shutdown_timer.py --at 23:30     # 23:30 关机
               python shutdown_timer.py --at 23:30 --action restart
+  桌面快捷方式：python shutdown_timer.py --shortcut
 """
 
 import argparse
 import datetime as dt
+import os
 import platform
 import subprocess
 import sys
@@ -87,6 +89,65 @@ def fmt_remaining(seconds):
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ---------------------------------------------------------------- 桌面快捷方式
+SHORTCUT_NAME = "定时关机"
+
+
+def desktop_dir():
+    if SYSTEM == "Windows":
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
+            capture_output=True, text=True, check=True)
+        return out.stdout.strip()
+    if SYSTEM == "Linux":
+        try:
+            out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except FileNotFoundError:
+            pass
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+
+def create_shortcut():
+    """在桌面创建启动图形界面的快捷方式，返回快捷方式路径。"""
+    script = os.path.abspath(__file__)
+    desktop = desktop_dir()
+    os.makedirs(desktop, exist_ok=True)
+
+    if SYSTEM == "Windows":
+        # 用 pythonw 启动，不弹黑色命令行窗口
+        exe = sys.executable
+        pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(pythonw):
+            exe = pythonw
+        path = os.path.join(desktop, SHORTCUT_NAME + ".lnk")
+        env = dict(os.environ, SC_PATH=path, SC_EXE=exe, SC_SCRIPT=script,
+                   SC_DIR=os.path.dirname(script))
+        ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:SC_PATH);"
+              "$s.TargetPath=$env:SC_EXE;"
+              "$s.Arguments='\"'+$env:SC_SCRIPT+'\"';"
+              "$s.WorkingDirectory=$env:SC_DIR;"
+              "$s.IconLocation='shell32.dll,27';"
+              "$s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=True)
+        return path
+
+    if SYSTEM == "Darwin":
+        path = os.path.join(desktop, SHORTCUT_NAME + ".command")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\nnohup "{sys.executable}" "{script}" >/dev/null 2>&1 &\n')
+    else:
+        path = os.path.join(desktop, SHORTCUT_NAME + ".desktop")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("[Desktop Entry]\nType=Application\n"
+                    f"Name={SHORTCUT_NAME}\n"
+                    f'Exec="{sys.executable}" "{script}"\n'
+                    "Icon=system-shutdown\nTerminal=false\n")
+    os.chmod(path, 0o755)
+    return path
 
 
 # ---------------------------------------------------------------- 命令行模式
@@ -243,7 +304,12 @@ def main():
     g.add_argument("--at", help="在指定时间执行，格式 HH:MM")
     p.add_argument("--action", choices=ACTIONS.keys(), default="shutdown", help="shutdown/restart/hibernate")
     p.add_argument("--dry-run", action="store_true", help="演示模式：到点只打印命令，不真正关机")
+    p.add_argument("--shortcut", action="store_true", help="在桌面创建快捷方式")
     args = p.parse_args()
+
+    if args.shortcut:
+        print("已创建桌面快捷方式：", create_shortcut())
+        return
 
     if args.minutes is not None or args.at:
         try:
